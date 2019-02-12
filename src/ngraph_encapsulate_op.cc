@@ -68,7 +68,14 @@ class NGraphEncapsulateOp : public OpKernel {
       : OpKernel(ctx),
         m_graph(OpRegistry::Global()),
         m_freshness_tracker(nullptr) {
-    NGRAPH_VLOG(2) << "NGraphEncapsulateOp: Name: " << name();
+    my_instance_id_ = instance_id_;
+    instance_id_++;
+
+    NGRAPH_VLOG(2) << "NGraphEncapsulateOp: " << my_instance_id_
+                   << " Name: " << name();
+
+    std::cout << "NGraphEncapsulateOp: " << my_instance_id_
+              << " Name: " << name() << std::endl;
     GraphDef* graph_def;
 
     OP_REQUIRES_OK(ctx, ctx->GetAttr<int>("ngraph_cluster", &m_ngraph_cluster));
@@ -214,8 +221,8 @@ class NGraphEncapsulateOp : public OpKernel {
   }
 
   void mem_usage(double& vm_usage, double& resident_set) {
-    vm_usage = 0.0;
-    resident_set = 0.0;
+    vm_usage = 0;
+    resident_set = 0;
 
     // the two fields we want
     unsigned long vsize;
@@ -231,8 +238,8 @@ class NGraphEncapsulateOp : public OpKernel {
     }
 
     long page_size_kb = sysconf(_SC_PAGE_SIZE) /
-                        1024;   // in case x86-64 is configured to use 2MB pages
-    vm_usage = vsize / 1024.0;  // unit kb
+                        1024;  // in case x86-64 is configured to use 2MB pages
+    vm_usage = vsize / 1024;   // unit kb
     resident_set = rss * page_size_kb;
   }
 
@@ -272,6 +279,7 @@ class NGraphEncapsulateOp : public OpKernel {
     }
 
     std::shared_ptr<ngraph::Function> ng_function;
+    std::shared_ptr<ngraph::Function> evicted_ng_function;
     std::string signature = signature_ss.str();
 
     if (NGRAPH_VLOG_IS_ON(5)) {
@@ -295,7 +303,7 @@ class NGraphEncapsulateOp : public OpKernel {
           ctx, Builder::TranslateGraph(input_shapes, static_input_map, &m_graph,
                                        ng_function));
 
-      auto function_size = ng_function->get_graph_size() / 1024.0;  // kb unit
+      auto function_size = ng_function->get_graph_size() / 1024;  // kb unit
 
       // Serialize to nGraph if needed
       if (std::getenv("NGRAPH_ENABLE_SERIALIZE") != nullptr) {
@@ -313,8 +321,16 @@ class NGraphEncapsulateOp : public OpKernel {
 #endif
       }
       // Evict the cache if the number of elements exceeds 16
-      if (m_ng_functions.size() > 16) {
+      const char* cache_depth_specified =
+          std::getenv("NGRAPH_TF_FUNCTION_CACHE_ITEM_DEPTH");
+      if (cache_depth_specified != nullptr) {
+        NGRAPH_TF_FUNCTION_CACHE_ITEM_DEPTH = atoi(cache_depth_specified);
+      }
+      if (m_ng_functions.size() >= NGRAPH_TF_FUNCTION_CACHE_ITEM_DEPTH) {
+        evicted_ng_function = m_ng_functions[LRU.back()];
         m_ng_functions.erase(LRU.back());
+        // Call delete function here pf he erased func
+        op_backend->remove_compiled_function(evicted_ng_function);
         LRU.pop_back();
       }
       m_ng_functions[signature] = ng_function;
@@ -323,11 +339,14 @@ class NGraphEncapsulateOp : public OpKernel {
       mem_usage(vm, rss);
       auto delta_vm_mem = vm - vm0;
       auto delta_res_mem = rss - rss0;
-      cout << "Step_ID: " << ctx->step_id()
-           << "  NGRAPH_TF_CACHE_PROFILE: " << ctx->op_kernel().name() << endl;
-      cout << "Delta Virtual Memory Measurment: " << delta_vm_mem
-           << "  Delta Resident Memory Measurment: " << delta_res_mem
-           << "  Function Memory Measurment: " << function_size << endl;
+      cout << "NGRAPH_TF_CACHE_PROFILE: Op: " << my_instance_id_
+           << " Step_ID: " << ctx->step_id()
+           << " Cache length: " << m_ng_functions.size()
+           << "  Function: " << ctx->op_kernel().name()
+           << "Delta VM: " << delta_vm_mem << "  Delta RSS: " << delta_res_mem
+           << "  Function size: " << function_size
+           << " KB Total RSS: " << rss / (1024 * 1024) << " GB "
+           << " VM: " << vm / (1024 * 1024) << " GB" << endl;
       NGRAPH_VLOG(1) << "Step_ID: " << ctx->step_id()
                      << "  NGRAPH_TF_CACHE_PROFILE: "
                      << ctx->op_kernel().name();
@@ -599,7 +618,12 @@ class NGraphEncapsulateOp : public OpKernel {
   std::mutex m_compute_lock;
   string m_op_backend_name;
   std::list<std::string> LRU;
+  int NGRAPH_TF_FUNCTION_CACHE_ITEM_DEPTH = 24;
+  static int instance_id_;
+  int my_instance_id_{0};
 };
+
+int NGraphEncapsulateOp::instance_id_ = 0;
 
 }  // namespace ngraph_bridge
 
