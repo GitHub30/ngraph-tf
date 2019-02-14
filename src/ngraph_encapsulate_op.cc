@@ -329,8 +329,26 @@ class NGraphEncapsulateOp : public OpKernel {
       if (m_ng_functions.size() >= NGRAPH_TF_FUNCTION_CACHE_ITEM_DEPTH) {
         evicted_ng_function = m_ng_functions[LRU.back()];
         m_ng_functions.erase(LRU.back());
+
         // Call delete function here pf he erased func
         op_backend->remove_compiled_function(evicted_ng_function);
+
+        // Now clean the input cache
+        std::vector<std::pair<void*, std::shared_ptr<ng::runtime::Tensor>>>&
+            input_caches = m_ng_function_input_cache_map[evicted_ng_function];
+        for (auto& next_input : input_caches) {
+          next_input.second.reset();
+        }
+        m_ng_function_input_cache_map.erase(evicted_ng_function);
+
+        // Clean the output cache
+        std::vector<std::pair<void*, std::shared_ptr<ng::runtime::Tensor>>>&
+            output_caches = m_ng_function_output_cache_map[evicted_ng_function];
+        for (auto& next_output : output_caches) {
+          next_output.second.reset();
+        }
+        m_ng_function_output_cache_map.erase(evicted_ng_function);
+
         LRU.pop_back();
       }
       m_ng_functions[signature] = ng_function;
@@ -343,7 +361,7 @@ class NGraphEncapsulateOp : public OpKernel {
            << " Step_ID: " << ctx->step_id()
            << " Cache length: " << m_ng_functions.size()
            << "  Function: " << ctx->op_kernel().name()
-           << "Delta VM: " << delta_vm_mem << "  Delta RSS: " << delta_res_mem
+           << " Delta VM: " << delta_vm_mem << "  Delta RSS: " << delta_res_mem
            << "  Function size: " << function_size
            << " KB Total RSS: " << rss / (1024 * 1024) << " GB "
            << " VM: " << vm / (1024 * 1024) << " GB" << endl;
